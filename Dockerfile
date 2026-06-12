@@ -1,5 +1,5 @@
 FROM node:20-alpine
-RUN apk add --no-cache ffmpeg fontconfig font-dejavu
+RUN apk add --no-cache ffmpeg ttf-dejavu
 WORKDIR /app
 COPY package.json ./
 RUN npm install --production
