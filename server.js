@@ -1,133 +1,70 @@
-/**
- * autolents-convert-service/server.js
- *
- * Servidor Express para Railway que convierte WebM → MP4
- * usando ffmpeg nativo (instalado en el contenedor).
- *
- * Uso:
- *   POST /convert  (multipart/form-data, campo "video")
- *   → Devuelve el MP4 directamente como respuesta.
- */
-
 import express from 'express';
-import multer from 'multer';
-import cors from 'cors';
 import { execSync } from 'child_process';
-import { unlinkSync, existsSync, mkdirSync } from 'fs';
+import { unlinkSync, existsSync, mkdirSync, statSync, readdirSync, rmdirSync, createWriteStream } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
+import https from 'https';
+import http from 'http';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TMP_DIR = join(__dirname, 'tmp');
+if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
 
-// Asegurar que el directorio temporal existe
-if (!existsSync(TMP_DIR)) {
-  mkdirSync(TMP_DIR, { recursive: true });
+const app = express();
+app.use(express.json({ limit: '10mb' }));
+
+function downloadImage(url, dest) {
+  return new Promise((resolve, reject) => {
+    const proto = url.startsWith('https') ? https : http;
+    const file = createWriteStream(dest);
+    proto.get(url, (r) => {
+      if (r.statusCode !== 200) return reject(new Error(`HTTP ${r.statusCode}`));
+      r.pipe(file);
+      file.on('finish', () => { file.close(); resolve(dest); });
+    }).on('error', (e) => { try { unlinkSync(dest); } catch {} reject(e); });
+  });
 }
 
-// ── Multer: almacenamiento temporal ────────────────────────────────────────────
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, TMP_DIR),
-  filename: (_req, file, cb) => {
-    const ext = file.mimetype === 'video/webm' ? '.webm' : '.webm';
-    cb(null, `input_${Date.now()}${ext}`);
-  },
+function esc(s) {
+  return (s||'').replace(/:/g,'\\:').replace(/'/g,"\\'").replace(/\[/g,'\\[').replace(/\]/g,'\\]');
+}
+
+app.post('/generate', async (req, res) => {
+  const jobId = randomUUID().slice(0,8);
+  const { images, title, price, store, cta, color } = req.body;
+  if (!images||!Array.isArray(images)||images.length===0) return res.status(400).json({error:'imagenes requeridas'});
+  if (images.length>10) return res.status(400).json({error:'max 10 imagenes'});
+  const d = join(TMP_DIR, jobId);
+  mkdirSync(d, { recursive: true });
+  const out = join(d, 'out.mp4');
+  try {
+    const dl = images.map((u,i) => { const e=(u.match(/\.(png|jpg|jpeg|webp)/i)||[,'jpg'])[1]; return downloadImage(u, join(d,`i${i}.${e}`)); });
+    const paths = await Promise.all(dl);
+    const T = paths.length, W = 1080, H = 1920;
+    let fc = paths.map((_,i)=>`[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,setpts=PTS-STARTPTS+${i*3}/TB[v${i}];`).join('');
+    fc += paths.map((_,i)=>`[v${i}]`).join('')+`concat=n=${T}:v=1:a=0,format=yuv420p[v];`;
+    fc += `[v]drawbox=x=0:y=H-400:w=W:h=400:color=black@0.6:t=fill[z];`;
+    const c1=(color||'#6B21A8').replace('#','');
+    if (store) fc+=`[z]drawtext=text='${esc(store)}':x=(W-text_w)/2:y=100:fontsize=48:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z1];`; else fc+=`[z]copy[z1];`;
+    if (title) fc+=`[z1]drawtext=text='${esc(title)}':x=(W-text_w)/2:y=H-350:fontsize=64:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z2];`; else fc+=`[z1]copy[z2];`;
+    if (price) fc+=`[z2]drawtext=text='${esc(String(price))}':x=(W-text_w)/2:y=H-250:fontsize=72:fontcolor='#${c1}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z3];`; else fc+=`[z2]copy[z3];`;
+    fc+=`[z3]drawtext=text='${esc(cta||'Compra ahora')}':x=(W-text_w)/2:y=H-140:fontsize=40:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf[o];`;
+    const cmd = `ffmpeg -y ${paths.flatMap(p=>['-i',p]).join(' ')} -filter_complex "${fc}" -map '[o]' -c:v libx264 -preset ultrafast -crf 26 -r 30 -pix_fmt yuv420p -movflags +faststart -t ${T*3} -threads 2 ${out}`;
+    const start = Date.now(); execSync(cmd, { timeout: 180000 });
+    console.log(`[${jobId}] ${((Date.now()-start)/1000).toFixed(1)}s - ${(statSync(out).size/1024/1024).toFixed(1)}MB`);
+    res.download(out, `${(store||'video').replace(/\s+/g,'_').toLowerCase()}_${jobId}.mp4`, ()=>{ try { paths.forEach(p=>{try{unlinkSync(p)}catch{}}); try{unlinkSync(out)}catch{}; try{rmdirSync(d)}catch{} } catch {} });
+  } catch (e) {
+    console.error(`[${jobId}] ${e.message}`);
+    try { readdirSync(d).forEach(f=>{try{unlinkSync(join(d,f))}catch{}}); try{rmdirSync(d)}catch{} } catch {}
+    res.status(500).json({error:'error', detail: e.message});
+  }
 });
 
-const upload = multer({
-  storage,
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB máximo
-  fileFilter: (_req, file, cb) => {
-    if (file.mimetype === 'video/webm' || file.originalname.endsWith('.webm')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Solo se aceptan archivos WebM'));
-    }
-  },
-});
-
-// ── Express ────────────────────────────────────────────────────────────────────
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-// ── POST /convert ──────────────────────────────────────────────────────────────
-app.post('/convert', (req, res) => {
-  upload.single('video')(req, res, async (err) => {
-    if (err) {
-      console.error('[convert] ❌ Error en upload:', err.message);
-      return res.status(400).json({ error: err.message });
-    }
-
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se envió ningún archivo' });
-    }
-
-    const inputPath  = req.file.path;
-    const outputPath = inputPath.replace(/\.webm$/, '') + '.mp4';
-
-    console.log(`[convert] 🔄 Convirtiendo: ${inputPath} → ${outputPath}`);
-
-    try {
-      const startTime = Date.now();
-
-      // ── Ejecutar ffmpeg nativo ─────────────────────────────────────────
-      //   Railway tiene ffmpeg instalado por defecto en el contenedor.
-      //   Flags optimizados para Reels/TikTok (9:16 vertical).
-      // ── Flags optimizadas para Railway (512MB RAM) ──────────────
-      //   ultrafast + threads 2 evita OOM (Out of Memory)
-      //   crf 28 es calidad aceptable para Reels/TikTok
-      const cmd = [
-        'ffmpeg',
-        '-y',
-        '-i', inputPath,
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-crf', '28',
-        '-r', '30',
-        '-vsync', 'cfr',
-        '-pix_fmt', 'yuv420p',
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-movflags', '+faststart',
-        '-threads', '2',
-        outputPath,
-      ].join(' ');
-
-      console.log(`[convert] 🎬 Ejecutando: ${cmd}`);
-      execSync(cmd, { timeout: 120_000 }); // timeout 2 min
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      console.log(`[convert] ✅ Conversión completada en ${elapsed}s`);
-
-      // ── Enviar el MP4 como respuesta ────────────────────────────────────
-      res.download(outputPath, 'autolents-reel.mp4', (downloadErr) => {
-        // Limpiar archivos temporales
-        try { unlinkSync(inputPath); }  catch {}
-        try { unlinkSync(outputPath); } catch {}
-
-        if (downloadErr) {
-          console.error('[convert] ❌ Error al enviar MP4:', downloadErr.message);
-        }
-      });
-    } catch (convErr) {
-      console.error('[convert] ❌ Error en conversión ffmpeg:', convErr.message);
-      // Intentar enviar stack trace
-      const detail = convErr.stderr?.toString() || convErr.message;
-      res.status(500).json({ error: 'Error en conversión', detail });
-
-      // Limpiar archivo de entrada
-      try { unlinkSync(inputPath); } catch {}
-    }
-  });
-});
-
-// ── GET /health ────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'autolents-convert-service' });
+  let v='no'; try { v=execSync('ffmpeg -version',{timeout:5000}).toString().split('\n')[0]; } catch {}
+  res.json({status:'ok', service:'bitrinia-video-generator', ffmpeg: v});
 });
 
-// ── Iniciar ────────────────────────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || '3001', 10);
-app.listen(PORT, () => {
-  console.log(`[convert] 🚀 Servidor corriendo en puerto ${PORT}`);
-});
+const PORT = parseInt(process.env.PORT||'3001',10);
+app.listen(PORT, ()=>console.log(`[video-gen] puerto ${PORT}`));
