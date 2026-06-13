@@ -52,7 +52,9 @@ function buildFilterComplex(N, W, H, store, title, price, ctaText, color, D, cro
 
   for (let i = 0; i < N; i++) {
     // Ken Burns zoom (1.0x -> 1.15x lento)
-    fc += `[${i}:v]zoompan=z='min(1.15,1.0+${zoomStep}*n)':d=${totalFrames}:s=${W}x${H}:fps=30`;
+    // NOTA: usamos '*on' (output frame number) porque ffmpeg 8.0.1 Alpine
+    // no reconoce 'n' como variable de frame
+    fc += `[${i}:v]zoompan=z='1.0+${zoomStep}*on':d=${totalFrames}:s=${W}x${H}:fps=30`;
 
     // Escalar y centrar
     fc += `,scale=${W}:${H}:force_original_aspect_ratio=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0`;
