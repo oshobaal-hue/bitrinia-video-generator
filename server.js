@@ -48,7 +48,7 @@ app.post('/generate', async (req, res) => {
     const T = paths.length, W = 1080, H = 1920;
     let fc = paths.map((_,i)=>`[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,setpts=PTS-STARTPTS+${i*3}/TB[v${i}];`).join('');
     fc += paths.map((_,i)=>`[v${i}]`).join('')+`concat=n=${T}:v=1:a=0,format=yuv420p[v];`;
-    fc += `[v]drawbox=x=0:y=H-400:w=W:h=400:color=black@0.6:t=fill[z];`;
+    fc += `[v]drawbox=x=0:y=1520:w=1080:h=400:color=black@0.6:t=fill[z];`;
     const c1=(color||'#6B21A8').replace('#','');
     if (store) fc+=`[z]drawtext=text='${esc(store)}':x=(W-text_w)/2:y=100:fontsize=48:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z1];`; else fc+=`[z]copy[z1];`;
     if (title) fc+=`[z1]drawtext=text='${esc(title)}':x=(W-text_w)/2:y=H-350:fontsize=64:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z2];`; else fc+=`[z1]copy[z2];`;
