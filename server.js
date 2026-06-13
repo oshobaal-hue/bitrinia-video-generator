@@ -39,12 +39,12 @@ function buildFilterComplex(N, W, H, store, title, description, price, ctaText, 
   const totalFrames = Math.round(D * 30);
   const zoomStep = (0.15 / Math.max(1, totalFrames - 1)).toFixed(8);
 
-  // Layout constants
+  // Layout 50/40/10: Imagen | Texto IA | Logo cliente + bitrinia
   const IMG_H = 960;   // 50%
-  const TEXT_H = 480;  // 25%
-  const BRAND_H = 480; // 25%
+  const TEXT_H = 768;  // 40% (más espacio para descripción IA)
+  const BRAND_H = 192; // 10%
   const TEXT_Y = 960;
-  const BRAND_Y = 1440;
+  const BRAND_Y = 1728;
 
   let fc = '';
 
@@ -120,16 +120,14 @@ function buildFilterComplex(N, W, H, store, title, description, price, ctaText, 
     // Forzamos un alias para simplificar
     fc += `[${txtStream}]copy[final_txt_${i}];`;
 
-    // Texto en zona de branding (nombre tienda + bitrinia.com)
+    // Brand zone 10% — Logo cliente izq + bitrinia.com der, sin línea divisoria
     let brStream = brandBgLabel;
     if (store) {
-      fc += `[${brStream}]drawtext=text='✨ ${esc(store)}':x=(W-text_w)/2:y=160:fontsize=30:fontcolor=white@'if(lte(t,0.5),0,min(0.7,(t-0.5)/0.5*0.7))':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:shadowcolor=black@0.2:shadowx=1:shadowy=1[br1_${i}];`;
+      fc += `[${brStream}]drawtext=text='✨ ${esc(store)}':x=30:y=${BRAND_H/2}:fontsize=26:fontcolor=white@'if(lte(t,0.5),0,min(0.8,(t-0.5)/0.5*0.8))':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:shadowcolor=black@0.2:shadowx=1:shadowy=1: text_align=L[br1_${i}];`;
       brStream = `br1_${i}`;
     }
-    // Línea divisoria
-    fc += `[${brStream}]drawbox=x=60:y=0:w=${W-120}:h=1:color=white@0.04:t=fill,`;
-    // bitrinia.com
-    fc += `drawtext=text='bitrinia.com':x=(W-text_w)/2:y=340:fontsize=18:fontcolor=#aaaaaa@'if(lte(t,0.8),0,min(0.35,(t-0.8)/0.5*0.35))':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf[final_br_${i}];`;
+    // bitrinia.com en esquina inferior derecha
+    fc += `[${brStream}]drawtext=text='bitrinia.com':x=${W-30}:y=${BRAND_H/2}:fontsize=16:fontcolor=#aaaaaa@'if(lte(t,0.8),0,min(0.35,(t-0.8)/0.5*0.35))':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text_align=R[final_br_${i}];`;
 
     // Stack: imagen (IMG_H) + texto (TEXT_H) + branding (BRAND_H)
     fc += `[${slideLabel}][final_txt_${i}][final_br_${i}]vstack=inputs=3[s${i}];`;
