@@ -1,13 +1,17 @@
-import express from 'express';
-import { execSync } from 'child_process';
-import { unlinkSync, existsSync, mkdirSync, statSync, readdirSync, rmdirSync, createWriteStream } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-import { randomUUID } from 'crypto';
-import https from 'https';
-import http from 'http';
+/**
+ * bitrinia-video-generator/server.js
+ * CommonJS - compatible con Alpine + Railway
+ * POST /generate => slideshow MP4 con overlay de texto
+ */
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const express = require('express');
+const { execSync } = require('child_process');
+const { unlinkSync, existsSync, mkdirSync, statSync, readdirSync, rmdirSync, createWriteStream } = require('fs');
+const { join, dirname } = require('path');
+const { randomUUID } = require('crypto');
+const https = require('https');
+const http = require('http');
+
 const TMP_DIR = join(__dirname, 'tmp');
 if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
 
