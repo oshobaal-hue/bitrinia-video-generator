@@ -46,11 +46,13 @@ function esc(s) {
 function buildFilterComplex(N, W, H, store, title, price, ctaText, color, D, crossfade, hasLogo) {
   const c1 = (color||'#6B21A8').replace('#','');
   const totalFrames = Math.round(D * 30);
+  // Calcular el incremento de zoom por frame en JS (max() no es válido en ffmpeg)
+  const zoomStep = (0.15 / Math.max(1, totalFrames - 1)).toFixed(8);
   let fc = '';
 
   for (let i = 0; i < N; i++) {
     // Ken Burns zoom (1.0x -> 1.15x lento)
-    fc += `[${i}:v]zoompan=z='min(1.15,1.0+(0.15*n)/max(1,${totalFrames-1}))':d=${totalFrames}:s=${W}x${H}:fps=30`;
+    fc += `[${i}:v]zoompan=z='min(1.15,1.0+${zoomStep}*n)':d=${totalFrames}:s=${W}x${H}:fps=30`;
 
     // Escalar y centrar
     fc += `,scale=${W}:${H}:force_original_aspect_ratio=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0`;
