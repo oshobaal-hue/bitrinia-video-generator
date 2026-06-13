@@ -1,13 +1,13 @@
 /**
  * bitrinia-video-generator/server.js
- * CommonJS - compatible con Alpine + Railway
- * POST /generate => slideshow MP4 con overlay de texto
+ * Video profesional con Ken Burns, crossfade, texto animado y branding
+ * POST /generate => MP4 profesional de 15s
  */
 
 const express = require('express');
 const { execSync } = require('child_process');
 const { unlinkSync, existsSync, mkdirSync, statSync, readdirSync, rmdirSync, createWriteStream } = require('fs');
-const { join, dirname } = require('path');
+const { join } = require('path');
 const { randomUUID } = require('crypto');
 const https = require('https');
 const http = require('http');
@@ -34,39 +34,167 @@ function esc(s) {
   return (s||'').replace(/:/g,'\\:').replace(/'/g,"\\'").replace(/\[/g,'\\[').replace(/\]/g,'\\]');
 }
 
+/**
+ * Construye el filter_complex de ffmpeg con todos los efectos:
+ * - Ken Burns zoom (1.0x -> 1.15x)
+ * - Fade in/out por slide
+ * - Texto animado (logo slide down, title slide up, price pulse, CTA fade)
+ * - Crossfade entre slides
+ * - Logo overlay
+ * - Branding bitrinia.com
+ */
+function buildFilterComplex(N, W, H, store, title, price, ctaText, color, D, crossfade, hasLogo) {
+  const c1 = (color||'#6B21A8').replace('#','');
+  const totalFrames = Math.round(D * 30);
+  let fc = '';
+
+  for (let i = 0; i < N; i++) {
+    // Ken Burns zoom (1.0x -> 1.15x lento)
+    fc += `[${i}:v]zoompan=z='min(1.15,1.0+(0.15*n)/max(1,${totalFrames-1}))':d=${totalFrames}:s=${W}x${H}:fps=30`;
+
+    // Escalar y centrar
+    fc += `,scale=${W}:${H}:force_original_aspect_ratio=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0`;
+
+    // Fade in / out por slide
+    fc += `,fade=t=in:st=0:d=0.4:color=black`;
+    fc += `,fade=t=out:st=${D-0.4}:d=0.4:color=black`;
+
+    // Logo tienda: slide down 0.0s->0.6s
+    if (store) {
+      const logoY = `if(lte(t,0.6),-100+(100+80)*(t/0.6),80)`;
+      fc += `,drawtext=text='${esc(store)}':x=(W-text_w)/2:y='${logoY}':fontsize=48:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:shadowcolor=black@0.5:shadowx=2:shadowy=2`;
+    }
+
+    // Nombre producto: slide up 0.5s->1.3s
+    if (title) {
+      const titleY = `if(lte(t,0.5),${H+50},if(lte(t,1.3),${H+50}-(${H+50}-${H-380})*((t-0.5)/0.8),${H-380}))`;
+      fc += `,drawtext=text='${esc(title)}':x=(W-text_w)/2:y='${titleY}':fontsize=60:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:shadowcolor=black@0.5:shadowx=3:shadowy=3`;
+    }
+
+    // Precio: pulse effect desde 1.2s
+    if (price) {
+      const priceFs = `if(lte(t,1.2),0,if(lte(t,1.8),72*(t-1.2)/0.6,72+6*sin(2*PI*4*t)))`;
+      fc += `,drawtext=text='${esc(String(price))}':x=(W-text_w)/2:y=${H-260}:fontsize='${priceFs}':fontcolor='#${c1}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:shadowcolor=black@0.5:shadowx=3:shadowy=3`;
+    }
+
+    // CTA: fade in desde 2.0s
+    if (ctaText) {
+      const ctaAlpha = `if(lte(t,2.0),0,min(1,(t-2.0)/0.6))`;
+      fc += `,drawtext=text='${esc(ctaText)}':x=(W-text_w)/2:y=${H-140}:fontsize=40:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:alpha='${ctaAlpha}':shadowcolor=black@0.5:shadowx=2:shadowy=2`;
+    }
+
+    // Branding bitrinia.com (siempre visible)
+    fc += `,drawtext=text='bitrinia.com':x=(W-text_w)/2:y=${H-50}:fontsize=22:fontcolor=white@0.4:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:shadowcolor=black@0.3:shadowx=1:shadowy=1`;
+
+    fc += `[v${i}];`;
+  }
+
+  // Crossfade chain
+  let finalSrc = 'v0';
+  if (N > 1) {
+    let prev = 'v0';
+    for (let j = 1; j < N; j++) {
+      const outLabel = (j === N-1) ? 'merged' : 'm'+j;
+      const offset = j * (D - crossfade);
+      fc += `[${prev}][v${j}]xfade=transition=fade:duration=${crossfade}:offset=${offset}[${outLabel}];`;
+      prev = outLabel;
+    }
+    finalSrc = 'merged';
+  }
+
+  // Logo overlay (esquina superior derecha)
+  if (hasLogo) {
+    fc += `[${finalSrc}][${N}:v]overlay=W-w-30:30,format=yuv420p[o];`;
+  } else {
+    fc += `[${finalSrc}]format=yuv420p[o];`;
+  }
+
+  return fc;
+}
+
 app.post('/generate', async (req, res) => {
   const jobId = randomUUID().slice(0,8);
-  const { images, title, price, store, cta, color } = req.body;
-  if (!images||!Array.isArray(images)||images.length===0) return res.status(400).json({error:'imagenes requeridas'});
-  if (images.length>10) return res.status(400).json({error:'max 10 imagenes'});
+  const { images, title, price, store, cta, color, logo_url } = req.body;
+
+  if (!images||!Array.isArray(images)||images.length===0)
+    return res.status(400).json({error:'imagenes requeridas'});
+  if (images.length>10)
+    return res.status(400).json({error:'max 10 imagenes'});
+
   const d = join(TMP_DIR, jobId);
   mkdirSync(d, { recursive: true });
   const out = join(d, 'out.mp4');
+
   try {
-    const dl = images.map((u,i) => { const e=(u.match(/\.(png|jpg|jpeg|webp)/i)||[,'jpg'])[1]; return downloadImage(u, join(d,`i${i}.${e}`)); });
-    const paths = await Promise.all(dl);
-    const T = paths.length, W = 1080, H = 1920;
-    let fc = paths.map((_,i)=>`[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=1,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,setpts=PTS-STARTPTS+${i*3}/TB[v${i}];`).join('');
-    fc += paths.map((_,i)=>`[v${i}]`).join('')+`concat=n=${T}:v=1:a=0,format=yuv420p[v];`;
-    fc += `[v]drawbox=x=0:y=1520:w=1080:h=400:color=black@0.6:t=fill[z];`;
-    const c1=(color||'#6B21A8').replace('#','');
-    if (store) fc+=`[z]drawtext=text='${esc(store)}':x=(W-text_w)/2:y=100:fontsize=48:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z1];`; else fc+=`[z]copy[z1];`;
-    if (title) fc+=`[z1]drawtext=text='${esc(title)}':x=(W-text_w)/2:y=H-350:fontsize=64:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z2];`; else fc+=`[z1]copy[z2];`;
-    if (price) fc+=`[z2]drawtext=text='${esc(String(price))}':x=(W-text_w)/2:y=H-250:fontsize=72:fontcolor='#${c1}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf[z3];`; else fc+=`[z2]copy[z3];`;
-    fc+=`[z3]drawtext=text='${esc(cta||'Compra ahora')}':x=(W-text_w)/2:y=H-140:fontsize=40:fontcolor=white:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf[o];`;
-    const cmd = `ffmpeg -y ${paths.flatMap(p=>['-i',p]).join(' ')} -filter_complex "${fc}" -map '[o]' -c:v libx264 -preset ultrafast -crf 26 -r 30 -pix_fmt yuv420p -movflags +faststart -t ${T*3} -threads 2 ${out}`;
-    const start = Date.now(); execSync(cmd, { timeout: 180000 });
-    console.log(`[${jobId}] ${((Date.now()-start)/1000).toFixed(1)}s - ${(statSync(out).size/1024/1024).toFixed(1)}MB`);
-    res.download(out, `${(store||'video').replace(/\s+/g,'_').toLowerCase()}_${jobId}.mp4`, ()=>{ try { paths.forEach(p=>{try{unlinkSync(p)}catch{}}); try{unlinkSync(out)}catch{}; try{rmdirSync(d)}catch{} } catch {} });
+    // Descargar imágenes
+    const imgPromises = images.map((u,i) => {
+      const ext = (u.match(/\.(png|jpg|jpeg|webp)/i)||[,'jpg'])[1];
+      return downloadImage(u, join(d,`i${i}.${ext}`));
+    });
+    const imgPaths = await Promise.all(imgPromises);
+
+    // Descargar logo si existe
+    let logoPath = null;
+    if (logo_url) {
+      try {
+        logoPath = join(d, 'logo.png');
+        await downloadImage(logo_url, logoPath);
+      } catch (e) {
+        console.log(`[${jobId}] Logo no disponible, continuando sin: ${e.message}`);
+        logoPath = null;
+      }
+    }
+
+    const W = 1080, H = 1920;
+    const crossfade = 0.5;
+    const N = imgPaths.length;
+
+    // Duración por slide: siempre ~15s total
+    let D;
+    if (N === 1) {
+      D = 15; // Una sola imagen, 15s de zoom continuo
+    } else {
+      // Total = N*D - (N-1)*crossfade >= 15
+      D = Math.max(3, Math.ceil(((15 + (N-1)*crossfade) / N) * 10) / 10);
+    }
+
+    // Construir filter complex
+    const ctaText = cta || 'Compra ahora';
+    const fc = buildFilterComplex(N, W, H, store, title, price, ctaText, color, D, crossfade, !!logoPath);
+
+    // Armar inputs ffmpeg
+    const allInputs = [...imgPaths];
+    if (logoPath) allInputs.push(logoPath);
+    const inputs = allInputs.flatMap(p => ['-i', p]).join(' ');
+    const totalDur = N === 1 ? D : (N * D - (N-1) * crossfade);
+
+    const cmd = `ffmpeg -y ${inputs} -filter_complex "${fc}" -map '[o]' -c:v libx264 -preset ultrafast -crf 28 -r 30 -pix_fmt yuv420p -movflags +faststart -t ${totalDur+0.5} -threads 2 ${out}`;
+
+    console.log(`[${jobId}] == Generando: ${N} img, ${totalDur.toFixed(1)}s, ${D.toFixed(1)}s/slide ==`);
+    const start = Date.now();
+    execSync(cmd, { timeout: 300000 });
+    const elapsed = ((Date.now()-start)/1000).toFixed(1);
+    const size = (statSync(out).size/1024/1024).toFixed(1);
+    console.log(`[${jobId}] == ${elapsed}s - ${size}MB ==`);
+
+    res.download(out, `${(store||'video').replace(/\s+/g,'_').toLowerCase()}_${jobId}.mp4`, () => {
+      try { allInputs.forEach(p=>{try{unlinkSync(p)}catch{}}); } catch {}
+      try { unlinkSync(out); } catch {}
+      try { rmdirSync(d); } catch {}
+    });
   } catch (e) {
-    console.error(`[${jobId}] ${e.message}`);
-    try { readdirSync(d).forEach(f=>{try{unlinkSync(join(d,f))}catch{}}); try{rmdirSync(d)}catch{} } catch {}
-    res.status(500).json({error:'error', detail: e.message});
+    console.error(`[${jobId}] Error: ${e.message}`);
+    try {
+      readdirSync(d).forEach(f=>{try{unlinkSync(join(d,f))}catch{}});
+      try{rmdirSync(d)}catch{}
+    } catch {}
+    res.status(500).json({error:'error generando video', detail: e.message});
   }
 });
 
 app.get('/health', (_req, res) => {
-  let v='no'; try { v=execSync('ffmpeg -version',{timeout:5000}).toString().split('\n')[0]; } catch {}
+  let v='no';
+  try { v=execSync('ffmpeg -version',{timeout:5000}).toString().split('\n')[0]; } catch {}
   res.json({status:'ok', service:'bitrinia-video-generator', ffmpeg: v});
 });
 
